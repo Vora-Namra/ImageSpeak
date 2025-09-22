@@ -1,0 +1,7 @@
+transformers
+torch
+langchain
+google-generativeai
+python-dotenv
+requests
+streamlit
