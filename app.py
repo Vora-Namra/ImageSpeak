@@ -165,25 +165,40 @@ def generate_story_from_text_gemini(scenario: str) -> str:
 
 
 def generate_speech_from_text_hf(message: str) -> str:
-    """Call Hugging Face TTS model via inference API, save file, and return filename.
+    """Convert text to speech using HuggingFace API or fallback to pyttsx3."""
+    import tempfile
+    
+    # 1) Hugging Face API (if token provided)
+    if HUGGINGFACE_API_TOKEN:
+        try:
+            model_name = "facebook/mms-tts-eng"  # reliable English TTS
+            API_URL = f"https://api-inference.huggingface.co/models/{model_name}"
+            headers = {"Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}"}
+            payload = {"inputs": message[:500]}  # limit text length
 
-    Returns the path to the saved audio file.
-    """
-    if not HUGGINGFACE_API_TOKEN:
-        raise RuntimeError("HUGGINGFACE_API_TOKEN not set in .env")
+            response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
 
-    API_URL: str = "https://api-inference.huggingface.co/models/espnet/kan-bayashi_ljspeech_vits"
-    headers: dict[str, str] = {"Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}"}
-    payloads: dict[str, str] = {"inputs": message}
+            if response.status_code == 200:
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as f:
+                    f.write(response.content)
+                    return f.name
+            else:
+                st.warning(f"HuggingFace TTS failed ({response.status_code}), falling back to local TTS.")
+        except Exception as e:
+            st.warning(f"HuggingFace TTS error: {e}. Falling back to local TTS.")
 
-    response = requests.post(API_URL, headers=headers, json=payloads, timeout=120)
-    if response.status_code != 200:
-        raise RuntimeError(f"HuggingFace inference failed: {response.status_code} {response.text}")
+    # 2) Local fallback with pyttsx3 (offline, no token required)
+    try:
+        import pyttsx3
+        engine = pyttsx3.init()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
+        temp_file.close()
 
-    out_path = "generated_audio.flac"
-    with open(out_path, "wb") as f:
-        f.write(response.content)
-    return out_path
+        engine.save_to_file(message[:400], temp_file.name)  # limit length for offline
+        engine.runAndWait()
+        return temp_file.name
+    except Exception as e:
+        raise RuntimeError(f"Both HuggingFace API and local TTS failed. Last error: {e}")
 
 
 def main() -> None:
