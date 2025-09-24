@@ -1,7 +1,7 @@
 import os
 import time
 from typing import Any
-
+from transformers import pipeline
 import requests
 import streamlit as st
 from dotenv import find_dotenv, load_dotenv
@@ -59,7 +59,7 @@ def ensure_transformers_available():
 
 
 def generate_text_from_image_local(path_or_bytes: str) -> str:
-    """Generate a short caption/scenario from an image using transformers' BLIP pipeline.
+    """Generate detailed & descriptive caption/scenario from an image using transformers' BLIP pipeline.
 
     Accepts a file path or bytes-like object (the pipeline will accept both).
     """
@@ -87,65 +87,68 @@ def generate_text_from_image_local(path_or_bytes: str) -> str:
         "or review the pipeline name for your installed transformers version."
     )
 
-
 def generate_story_from_text_gemini(scenario: str) -> str:
-    """Generate a short story using Google Gemini (via google.generativeai).
-
-    This function attempts to call the google.generativeai client if installed and configured.
-    If the client isn't present or the API fails, we return a helpful message or fallback story.
     """
+    Use Gemini to rewrite the extracted scenario in a slightly more descriptive
+    and polished way, but WITHOUT inventing new details. 
+    The output must remain faithful to the original input.
+    """
+
     if not GEMINI_API_KEY:
-        # no key provided: return helpful fallback text (so app stays responsive)
         return (
-            "No GEMINI_API_KEY provided. Install and set GEMINI_API_KEY in your .env to get an AI-generated story.\n\n"
+            "No GEMINI_API_KEY provided. Install and set GEMINI_API_KEY in your .env.\n\n"
             "Fallback: " + (scenario[:200] + "..." if len(scenario) > 200 else scenario)
         )
 
     if genai is None:
-        # client not installed
         return (
-            "google.generativeai package not installed or failed to import. "
-            "Install google-generativeai and restart app.\n"
+            "google.generativeai package not installed. Install google-generativeai and restart.\n"
             "Fallback scenario: " + (scenario[:200] + "..." if len(scenario) > 200 else scenario)
         )
 
-    # configure client
     try:
         genai.configure(api_key=GEMINI_API_KEY)
     except Exception:
-        # Some versions use genai.configure; if it fails, continue — we'll try other calls below
         pass
 
-    # attempt to call the typical client method(s)
     try:
-        # Preferred current usage in some SDKs: genai.generate or genai.generate_text
-        # We attempt multiple plausible APIs and pick the first that works.
-        # 1) Try modern/simple genai.generate (may vary by SDK version)
+        # ✅ STRICT prompt: elaborate descriptively but do not add imaginary content
+        prompt = (
+            f"Rewrite the following scene in a slightly more descriptive and polished way, "
+            f"but do not add, remove, or invent any details. Keep all original content intact. "
+            f"Output should be <=50 words.\n\nScene: {scenario}"
+        )
+
+        # Preferred new API
         try:
-            resp = genai.generate(model="gemini-1.5-flash", prompt=f"Create a short story (<=50 words) from: {scenario}")
-            text = getattr(resp, "text", None) or (resp.get("candidates")[0].get("content") if isinstance(resp, dict) else None)
+            resp = genai.generate(model="gemini-1.5-flash", prompt=prompt)
+            text = getattr(resp, "text", None) or (
+                resp.get("candidates")[0].get("content") if isinstance(resp, dict) else None
+            )
             if text:
                 return text.strip()
         except Exception:
             pass
 
-        # 2) Try older-style genai.messages or genai.models.generate_content if available
+        # Older API (models.generate)
         try:
-            # genai may expose models or a messages API
             if hasattr(genai, "models") and hasattr(genai.models, "generate"):
-                resp = genai.models.generate(model="gemini-1.5-flash", prompt=f"Create a short story (<=50 words) from: {scenario}")
-                # resp shape may vary:
-                text = resp.text if hasattr(resp, "text") else (resp.get("candidates")[0]["content"] if isinstance(resp, dict) and resp.get("candidates") else None)
+                resp = genai.models.generate(model="gemini-1.5-flash", prompt=prompt)
+                text = resp.text if hasattr(resp, "text") else (
+                    resp.get("candidates")[0]["content"]
+                    if isinstance(resp, dict) and resp.get("candidates")
+                    else None
+                )
                 if text:
                     return text.strip()
         except Exception:
             pass
 
-        # 3) As last attempt, try a "generate_content" style API
+        # generate_content API
         try:
             if hasattr(genai, "GenerativeModel"):
                 model = genai.GenerativeModel("gemini-1.5-flash")
-                resp = model.generate_content(f"Create a short story (<=50 words) from: {scenario}")
+                resp = model.generate_content(prompt)
                 text = getattr(resp, "text", None)
                 if text:
                     return text.strip()
@@ -153,53 +156,45 @@ def generate_story_from_text_gemini(scenario: str) -> str:
             pass
 
     except Exception:
-        # fall through to fallback
         pass
 
-    # final fallback: produce a naive short story locally (guaranteed to run)
-    words = scenario.split()
-    short = " ".join(words[:30]).strip()
-    if not short:
-        short = "A lively scene unfolds as colors and faces tell a small, quiet story."
-    return f"(Fallback short story) {short}."
-
+    # Fallback: just return the scenario (keeps originality)
+    return f"(Fallback - original preserved) {scenario}"
 
 def generate_speech_from_text_hf(message: str) -> str:
     """Convert text to speech using HuggingFace API or fallback to pyttsx3."""
-    import tempfile
-    
+    os.makedirs("audio", exist_ok=True)  # ensure audio dir exists
+    timestamp = int(time.time())
+    out_path = os.path.join("audio", f"story_{timestamp}.wav")
+
     # 1) Hugging Face API (if token provided)
     if HUGGINGFACE_API_TOKEN:
         try:
-            model_name = "facebook/mms-tts-eng"  # reliable English TTS
+            model_name = "facebook/mms-tts-eng"
             API_URL = f"https://api-inference.huggingface.co/models/{model_name}"
             headers = {"Authorization": f"Bearer {HUGGINGFACE_API_TOKEN}"}
-            payload = {"inputs": message[:500]}  # limit text length
+            payload = {"inputs": message[:500]}
 
             response = requests.post(API_URL, headers=headers, json=payload, timeout=120)
 
-            if response.status_code == 200:
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.wav') as f:
+            if response.status_code == 200 and response.headers.get("content-type", "").startswith("audio"):
+                with open(out_path, "wb") as f:
                     f.write(response.content)
-                    return f.name
+                return out_path
             else:
                 st.warning(f"HuggingFace TTS failed ({response.status_code}), falling back to local TTS.")
         except Exception as e:
             st.warning(f"HuggingFace TTS error: {e}. Falling back to local TTS.")
 
-    # 2) Local fallback with pyttsx3 (offline, no token required)
+    # 2) Local fallback (pyttsx3)
     try:
         import pyttsx3
         engine = pyttsx3.init()
-        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.wav')
-        temp_file.close()
-
-        engine.save_to_file(message[:400], temp_file.name)  # limit length for offline
+        engine.save_to_file(message[:400], out_path)
         engine.runAndWait()
-        return temp_file.name
+        return out_path
     except Exception as e:
         raise RuntimeError(f"Both HuggingFace API and local TTS failed. Last error: {e}")
-
 
 def main() -> None:
     st.set_page_config(page_title="IMAGE TO STORY CONVERTER", page_icon="🖼️")
@@ -208,6 +203,10 @@ def main() -> None:
     # Top-level import check
     if not ensure_transformers_available():
         st.stop()
+
+    # Ensure folders exist
+    os.makedirs("uploads", exist_ok=True)
+    os.makedirs("audio", exist_ok=True)
 
     with st.sidebar:
         # show a sample if exists
@@ -223,17 +222,21 @@ def main() -> None:
         st.info("Upload an image to begin. If you do not have an image handy, use the sample in img/gkj.jpg")
         return
 
-    # Save uploaded file locally (safe for Windows)
+    # Save uploaded file inside /uploads with timestamp to avoid overwrite
     file_name = uploaded_file.name
-    with open(file_name, "wb") as f:
+    timestamp = int(time.time())
+    safe_name = f"{timestamp}_{file_name}"
+    image_path = os.path.join("uploads", safe_name)
+
+    with open(image_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    st.image(file_name, caption="Uploaded Image", use_container_width=True)
+    st.image(image_path, caption="Uploaded Image", use_container_width=True)
     progress_bar(60)
 
     # 1) Image -> Text (caption / scenario)
     try:
-        scenario = generate_text_from_image_local(file_name)
+        scenario = generate_text_from_image_local(image_path)
     except Exception as e:
         st.error("Failed to generate text from image.")
         st.exception(e)
@@ -245,7 +248,6 @@ def main() -> None:
     except Exception as e:
         st.error("Failed to generate story from text.")
         st.exception(e)
-        # produce a fallback short story so UI continues
         story = "(Fallback) " + (scenario[:160] + "..." if len(scenario) > 160 else scenario)
 
     # 3) Story -> Speech (HuggingFace TTS)
@@ -255,7 +257,6 @@ def main() -> None:
     except Exception as e:
         st.error("Failed to generate speech (Hugging Face).")
         st.exception(e)
-        # do not return — still show scenario and story
 
     # Show outputs
     with st.expander("Generated Image scenario"):
@@ -266,6 +267,13 @@ def main() -> None:
 
     if audio_file and os.path.exists(audio_file):
         st.audio(audio_file)
+        with open(audio_file, "rb") as f:
+            st.download_button(
+                "Download Audio",
+                f,
+                file_name=os.path.basename(audio_file),
+                mime="audio/wav"
+            )
     else:
         st.info("Audio not available (HuggingFace TTS may have failed). You can still read the generated story above.")
 
